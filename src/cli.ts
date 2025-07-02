@@ -2,6 +2,9 @@
 
 import { Command } from "commander";
 import inquirer from "inquirer";
+import { Separator } from "@inquirer/prompts";
+import fileSelector from "inquirer-file-selector";
+import search from "@inquirer/search";
 import chalk from "chalk";
 import ora from "ora";
 import { LLMProcessor } from "./processor.ts";
@@ -10,7 +13,6 @@ import type { ProcessConfig, ModelConfig, OpenRouterModel } from "./types.ts";
 import { formatDuration, validateDirectory } from "./utils.ts";
 
 const program = new Command();
-
 let modelCache: OpenRouterModel[] = [];
 
 program
@@ -25,7 +27,6 @@ program
   .option("-k, --api-key <key>", "OpenRouter API key")
   .option("-m, --model <model>", "Model to use")
   .option("-c, --concurrent <number>", "Number of concurrent requests", "3")
-
   .action(async (options) => {
     try {
       const config = await getConfiguration(options);
@@ -54,11 +55,15 @@ program
 program
   .command("context")
   .description("Run a single prompt with other files as context")
-  .argument("<directory>", "Directory containing the prompt and context files")
-  .action(async (directory) => {
+  .option(
+    "-d, --directory <path>",
+    "Directory to create examples in",
+    undefined
+  )
+  .action(async (options) => {
     try {
-      const config = await getConfiguration({ directory });
-      await runContextualProcessor(config, directory);
+      const config = await getConfiguration(options);
+      await runContextualProcessor(config, config.directory);
     } catch (error) {
       console.error(
         chalk.red("Error:"),
@@ -71,19 +76,13 @@ program
 async function getConfiguration(options: any): Promise<ProcessConfig> {
   const questions: any[] = [];
 
-  // Directory
-  if (!options.directory) {
-    questions.push({
-      type: "input",
-      name: "directory",
-      message: "Enter the directory containing prompt files:",
-      default: "./prompts",
-      validate: async (input: string) => {
-        const isValid = await validateDirectory(input);
-        return isValid
-          ? true
-          : "Directory not found. Please enter a valid path.";
-      },
+  let directory = options.directory;
+
+  if (!directory) {
+    directory = await fileSelector({
+      message: "Select the directory containing prompt files:",
+      type: "directory",
+      filter: (stats) => stats.isDirectory(),
     });
   }
 
@@ -152,9 +151,9 @@ async function getConfiguration(options: any): Promise<ProcessConfig> {
     const modelSettings = await getModelConfiguration(selectedModel);
 
     return {
-      directory: options.directory || basicAnswers.directory,
+      directory: directory,
       apiKey: finalApiKey,
-      concurrent: parseInt(options.concurrent),
+      concurrent: parseInt(options.concurrent, 10),
       model: selectedModel,
       modelConfig: {
         model: selectedModel.id,
@@ -175,84 +174,38 @@ async function selectModel(
 ): Promise<string> {
   const popularModels = OpenRouterAPI.getPopularModels();
 
-  const popularAvailable = availableModels.filter((model) =>
-    popularModels.includes(model.id)
-  );
-
-  const initialChoices = [
-    new inquirer.Separator("🔥 Popular Models"),
-    ...popularAvailable.map((model) => ({
-      name: openRouterAPI.formatModelForDisplay(model),
-      value: model.id,
-    })),
-    new inquirer.Separator(),
-    { name: "Browse all models by provider...", value: "browse_by_provider" },
-  ];
-
-  const { initialSelection } = await inquirer.prompt([
-    {
-      type: "list",
-      name: "initialSelection",
-      message: "Select a model:",
-      choices: initialChoices,
-      default: "anthropic/claude-3.5-sonnet",
-      pageSize: 15,
-    },
-  ]);
-
-  if (initialSelection !== "browse_by_provider") {
-    return initialSelection;
-  }
-
-  // --- User chose to browse by provider ---
-
-  const providers = [
-    ...new Set(
-      availableModels.map((model) => {
-        const parts = model.id.split("/");
-        return parts.length > 1 ? parts[0] : "Other";
-      })
-    ),
-  ].sort();
-
-  const { selectedProvider } = await inquirer.prompt([
-    {
-      type: "list",
-      name: "selectedProvider",
-      message: "Select a provider:",
-      choices: providers,
-      pageSize: 20,
-    },
-  ]);
-
-  let providerModels: OpenRouterModel[];
-  if (selectedProvider === "Other") {
-    providerModels = availableModels.filter((model) => !model.id.includes("/"));
-  } else {
-    providerModels = availableModels.filter((model) =>
-      model.id.startsWith(`${selectedProvider}/`)
-    );
-  }
-
-  const { selectedModel } = await inquirer.prompt([
-    {
-      type: "list",
-      name: "selectedModel",
-      message: `Select a model from ${selectedProvider}:`,
-      choices: providerModels.map((model) => ({
+  return search({
+    message: "Select a model (type to search):",
+    source: (input) => {
+      const allItems = availableModels.map((model) => ({
         name: openRouterAPI.formatModelForDisplay(model),
         value: model.id,
-      })),
-      pageSize: 15,
-    },
-  ]);
+        description: model.description,
+      }));
 
-  return selectedModel;
+      if (!input) {
+        const popularAvailable = allItems.filter((item) =>
+          popularModels.includes(item.value)
+        );
+        const otherModels = allItems.filter(
+          (item) => !popularModels.includes(item.value)
+        );
+        return [
+          new Separator("🔥 Popular Models"),
+          ...popularAvailable,
+          new Separator("📋 All Other Models"),
+          ...otherModels,
+        ];
+      }
+
+      return allItems.filter((item) =>
+        item.value.toLowerCase().includes(input.toLowerCase())
+      );
+    },
+  });
 }
 
-async function getModelConfiguration(
-  model: OpenRouterModel
-): Promise<{
+async function getModelConfiguration(model: OpenRouterModel): Promise<{
   modelConfig: Partial<ModelConfig>;
   webSearch?: boolean;
   reasoningLevel?: "low" | "medium" | "high";
@@ -405,8 +358,10 @@ async function runProcessor(config: ProcessConfig): Promise<void> {
     if (successes.length > 0) {
       console.log(chalk.green("\n✅ Successful files:"));
       successes.forEach((success) => {
-        const costString = success.cost ? ` ($${success.cost.toFixed(6)})` : '';
-        console.log(`  ${success.file} (${formatDuration(success.duration)})${costString}`);
+        const costString = success.cost ? ` ($${success.cost.toFixed(6)})` : "";
+        console.log(
+          `  ${success.file} (${formatDuration(success.duration)})${costString}`
+        );
       });
     }
   } catch (error) {
@@ -480,7 +435,10 @@ print("Average:", result)`,
   }
 }
 
-async function runContextualProcessor(config: ProcessConfig, directory: string) {
+async function runContextualProcessor(
+  config: ProcessConfig,
+  directory: string
+) {
   const spinner = ora("Initializing contextual processor...").start();
   try {
     const processor = new LLMProcessor(config);
@@ -495,17 +453,12 @@ async function runContextualProcessor(config: ProcessConfig, directory: string) 
     spinner.succeed(`Found ${allFiles.length} potential prompt/context files.`);
 
     // Ask user to select the main prompt
-    const { mainPromptPath } = await inquirer.prompt([
-      {
-        type: "list",
-        name: "mainPromptPath",
-        message: "Select the main prompt to execute:",
-        choices: allFiles.map((file) => ({
-          name: file.name,
-          value: file.path,
-        })),
-      },
-    ]);
+    const mainPromptPath = await fileSelector({
+      message: "Select the main prompt to execute:",
+      type: "file",
+      basePath: directory,
+      filter: (stats) => stats.isFile(),
+    });
 
     const mainPromptFile = allFiles.find(
       (file) => file.path === mainPromptPath
