@@ -32,12 +32,12 @@ bun install
 
 3. **Create example prompts**:
    ```bash
-   bun run src/cli.ts init
+   bun prompt init
    ```
 
 4. **Process the prompts**:
    ```bash
-   bun run src/cli.ts run
+   bun prompt run
    ```
 
 ## Usage
@@ -47,7 +47,7 @@ bun install
 Create a directory with example prompt files:
 
 ```bash
-bun run src/cli.ts init -d ./my-prompts
+bun prompt init -d ./my-prompts
 ```
 
 ### Process Prompts
@@ -55,7 +55,7 @@ bun run src/cli.ts init -d ./my-prompts
 Run the interactive CLI to process prompts:
 
 ```bash
-bun run src/cli.ts run
+bun prompt run
 ```
 
 The CLI will:
@@ -68,7 +68,7 @@ The CLI will:
 Or use command line options:
 
 ```bash
-bun run src/cli.ts run \
+bun prompt run \
   --directory ./prompts \
   --api-key your-api-key \
   --model anthropic/claude-3.5-sonnet \
