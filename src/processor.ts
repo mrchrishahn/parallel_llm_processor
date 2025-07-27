@@ -1,8 +1,7 @@
 import OpenAI from 'openai';
-import { readdir, readFile, writeFile, stat } from 'fs/promises';
-import { join, extname, basename } from 'path';
-import type { ProcessConfig, PromptFile, ProcessResult, ModelConfig } from './types.ts';
-import { formatDuration } from './utils.ts';
+import { readdir, readFile, writeFile, stat, mkdir } from 'node:fs/promises';
+import { join, extname, basename } from 'node:path';
+import type { ProcessConfig, PromptFile, ProcessResult, CSVProcessResult, CSVRow, CombinedFileData } from './types.ts';
 
 export class LLMProcessor {
   private client: OpenAI;
@@ -194,15 +193,15 @@ export class LLMProcessor {
       const explicitlyReferencedFiles = new Set<string>();
       const injectionRegex = /{{\s*([^}]+)\s*}}/g;
 
-      mainPromptContent = mainPromptContent.replace(
-        injectionRegex,
-        (match, fileName) => {
+              mainPromptContent = mainPromptContent.replace(
+          injectionRegex,
+          (_match, fileName) => {
           const referencedFile = contextFiles.find(
-            (file) => file.name === fileName.trim()
-          );
-          if (referencedFile) {
-            explicitlyReferencedFiles.add(referencedFile.path);
-            return referencedFile.content;
+             (file) => file.name === fileName.trim()
+           );
+           if (referencedFile) {
+             explicitlyReferencedFiles.add(referencedFile.path);
+             return referencedFile.content;
           }
           // If file not found, leave placeholder to indicate missing context
           return `[Warning: Context file "${fileName}" not found]`;
@@ -288,5 +287,289 @@ export class LLMProcessor {
         duration: Date.now() - startTime,
       };
     }
+  }
+
+  // CSV Processing Methods
+  async processCsvWithTemplate(csvPath: string, templatePath: string, outputDirectory: string, idColumn?: string): Promise<CSVProcessResult[]> {
+    const csv = await import('csv-parser');
+    const { createReadStream } = await import('node:fs');
+    
+    // Read template
+    const template = await readFile(templatePath, 'utf-8');
+    
+    // Ensure output directory exists
+    await mkdir(outputDirectory, { recursive: true });
+    
+    // Parse CSV
+    const rows: CSVRow[] = [];
+    return new Promise((resolve, reject) => {
+      createReadStream(csvPath)
+        .pipe(csv.default())
+        .on('data', (row: CSVRow) => {
+          rows.push(row);
+        })
+        .on('end', async () => {
+          try {
+            const results = await this.processCSVRows(rows, template, outputDirectory, idColumn);
+            resolve(results);
+          } catch (error) {
+            reject(error);
+          }
+        })
+        .on('error', reject);
+    });
+  }
+
+  private async processCSVRows(rows: CSVRow[], template: string, outputDirectory: string, idColumn?: string): Promise<CSVProcessResult[]> {
+    const concurrency = this.config.concurrent || 3;
+    const results: CSVProcessResult[] = [];
+    
+    for (let i = 0; i < rows.length; i += concurrency) {
+      const batch = rows.slice(i, i + concurrency);
+      const batchPromises = batch.map((row, batchIndex) => 
+        this.processCSVRow(row, template, outputDirectory, i + batchIndex, idColumn)
+      );
+      const batchResults = await Promise.allSettled(batchPromises);
+      
+      results.push(...batchResults.map(result => {
+        if (result.status === 'fulfilled') {
+          return result.value;
+        } else {
+          const rowIndex = i + batchResults.indexOf(result.reason);
+          return {
+            file: `row_${rowIndex}`,
+            success: false,
+            error: result.reason instanceof Error ? result.reason.message : String(result.reason),
+            duration: 0,
+            rowIndex,
+            rowData: rows[rowIndex],
+            outputFilePath: '',
+          };
+        }
+      }));
+      
+      console.log(`Processed CSV batch ${Math.floor(i / concurrency) + 1}/${Math.ceil(rows.length / concurrency)}`);
+    }
+    
+    return results;
+  }
+
+  private async processCSVRow(row: CSVRow, template: string, outputDirectory: string, rowIndex: number, idColumn?: string): Promise<CSVProcessResult> {
+    const startTime = Date.now();
+    
+    try {
+      // Replace template variables with row data
+      let processedPrompt = template;
+      Object.keys(row).forEach(key => {
+        const placeholder = new RegExp(`{{\\s*${key}\\s*}}`, 'g');
+        processedPrompt = processedPrompt.replace(placeholder, String(row[key]));
+      });
+
+      // Generate output filename
+      const identifier = idColumn && row[idColumn] ? String(row[idColumn]) : `row_${rowIndex}`;
+      const outputFilePath = join(outputDirectory, `${identifier}_result.txt`);
+
+      const messages: OpenAI.Chat.Completions.ChatCompletionMessageParam[] = [
+        {
+          role: 'user',
+          content: processedPrompt,
+        },
+      ];
+
+      let modelName = this.config.modelConfig.model;
+      const requestConfig: OpenAI.Chat.Completions.ChatCompletionCreateParams = {
+        model: modelName,
+        messages,
+        temperature: this.config.modelConfig.temperature,
+        max_tokens: this.config.modelConfig.maxTokens,
+        top_p: this.config.modelConfig.topP,
+        frequency_penalty: this.config.modelConfig.frequencyPenalty,
+        presence_penalty: this.config.modelConfig.presencePenalty,
+      };
+
+      if (this.config.webSearch) {
+        if (this.config.reasoningLevel) {
+          (requestConfig as any).web_search_options = { search_context_size: this.config.reasoningLevel };
+        } else {
+          modelName = `${modelName}:online`;
+        }
+      }
+      
+      requestConfig.model = modelName;
+
+      if ((this.config.modelConfig as any).reasoning) {
+        (requestConfig as any).reasoning = {};
+      }
+
+      const completion = await this.client.chat.completions.create(requestConfig);
+      const result = completion.choices[0]?.message?.content || 'No response generated';
+      
+      await writeFile(outputFilePath, result, 'utf-8');
+      
+      const duration = Date.now() - startTime;
+      
+      const usage = completion.usage;
+      let cost = 0;
+      if (usage) {
+        const { prompt_tokens, completion_tokens } = usage;
+        const promptPrice = parseFloat(this.config.model.pricing.prompt);
+        const completionPrice = parseFloat(this.config.model.pricing.completion);
+        cost = (prompt_tokens * promptPrice) + (completion_tokens * completionPrice);
+      }
+      
+      return {
+        file: `${identifier}_result.txt`,
+        success: true,
+        result,
+        duration,
+        usage: usage || undefined,
+        cost: cost || undefined,
+        rowIndex,
+        rowData: row,
+        outputFilePath,
+      };
+    } catch (error) {
+      const duration = Date.now() - startTime;
+      const identifier = idColumn && row[idColumn] ? String(row[idColumn]) : `row_${rowIndex}`;
+      
+      return {
+        file: `${identifier}_result.txt`,
+        success: false,
+        error: error instanceof Error ? error.message : String(error),
+        duration,
+        rowIndex,
+        rowData: row,
+        outputFilePath: '',
+      };
+    }
+  }
+
+  // File Combination Methods
+  async combineFilesToCSV(sourceDirectory: string, outputPath: string, includeMetadata = false): Promise<void> {
+    const csvWriter = await import('csv-writer');
+    
+    const files = await readdir(sourceDirectory);
+    const combinedData: CombinedFileData[] = [];
+    
+    for (const file of files) {
+      const filePath = join(sourceDirectory, file);
+      const stats = await stat(filePath);
+      
+      if (!stats.isFile()) continue;
+      
+      try {
+        const content = await readFile(filePath, 'utf-8');
+        const ext = extname(file).toLowerCase();
+        
+        let parsedContent: any = content;
+        let fileType: 'json' | 'text' | 'other' = 'text';
+        let parseError: string | undefined;
+        
+        if (ext === '.json') {
+          try {
+            parsedContent = JSON.parse(content);
+            fileType = 'json';
+          } catch (error) {
+            parseError = error instanceof Error ? error.message : 'Failed to parse JSON';
+            fileType = 'other';
+          }
+        }
+        
+        const fileData: CombinedFileData = {
+          filename: file,
+          filepath: filePath,
+          content: parsedContent,
+          fileType,
+          parseError,
+        };
+        
+        if (includeMetadata) {
+          fileData.metadata = {
+            size: stats.size,
+            created: stats.birthtime,
+            modified: stats.mtime,
+          };
+        }
+        
+        combinedData.push(fileData);
+      } catch (error) {
+        // Skip files that can't be read
+        console.warn(`Warning: Could not read file ${file}:`, error);
+      }
+    }
+    
+    // Determine CSV structure based on data
+    const headers = this.generateCSVHeaders(combinedData, includeMetadata);
+    const csvRows = this.flattenDataForCSV(combinedData, headers);
+    
+    const writer = csvWriter.createObjectCsvWriter({
+      path: outputPath,
+      header: headers.map(h => ({ id: h, title: h })),
+    });
+    
+    await writer.writeRecords(csvRows);
+  }
+
+  private generateCSVHeaders(data: CombinedFileData[], includeMetadata: boolean): string[] {
+    const headers = new Set<string>(['filename', 'filepath', 'fileType']);
+    
+    if (includeMetadata) {
+      headers.add('size');
+      headers.add('created');
+      headers.add('modified');
+    }
+    
+    // For JSON files, extract all unique keys
+    data.forEach(item => {
+      if (item.fileType === 'json' && typeof item.content === 'object' && item.content !== null) {
+        Object.keys(item.content).forEach(key => headers.add(`json_${key}`));
+      } else if (item.fileType === 'text') {
+        headers.add('text_content');
+      }
+      
+      if (item.parseError) {
+        headers.add('parseError');
+      }
+    });
+    
+    return Array.from(headers);
+  }
+
+  private flattenDataForCSV(data: CombinedFileData[], headers: string[]): any[] {
+    return data.map(item => {
+      const row: any = {
+        filename: item.filename,
+        filepath: item.filepath,
+        fileType: item.fileType,
+      };
+      
+      if (item.metadata) {
+        row.size = item.metadata.size;
+        row.created = item.metadata.created.toISOString();
+        row.modified = item.metadata.modified.toISOString();
+      }
+      
+      if (item.parseError) {
+        row.parseError = item.parseError;
+      }
+      
+      if (item.fileType === 'json' && typeof item.content === 'object' && item.content !== null) {
+        Object.keys(item.content).forEach(key => {
+          const value = item.content[key];
+          row[`json_${key}`] = typeof value === 'object' ? JSON.stringify(value) : value;
+        });
+      } else if (item.fileType === 'text') {
+        row.text_content = item.content;
+      }
+      
+      // Ensure all headers are present
+      headers.forEach(header => {
+        if (!(header in row)) {
+          row[header] = '';
+        }
+      });
+      
+      return row;
+    });
   }
 } 

@@ -1,0 +1,8 @@
+This is a sample text file that contains some notes about the project.
+
+It demonstrates how the file combination feature can handle mixed file types:
+- JSON files will be parsed and their keys extracted as columns
+- Text files will have their content stored in a text_content column
+- The system handles different file types gracefully
+
+This feature is useful for consolidating data from various sources into a single CSV for analysis. 

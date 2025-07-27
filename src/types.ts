@@ -40,6 +40,45 @@ export interface ProcessResult {
   };
 }
 
+// New interfaces for CSV processing
+export interface CSVProcessConfig extends ProcessConfig {
+  csvPath: string;
+  templatePath: string;
+  outputDirectory: string;
+  idColumn?: string; // Column to use as identifier for output files
+}
+
+export interface CSVRow {
+  [key: string]: string | number | boolean;
+}
+
+export interface CSVProcessResult extends ProcessResult {
+  rowIndex: number;
+  rowData: CSVRow;
+  outputFilePath: string;
+}
+
+// New interfaces for file combination
+export interface FileCombineConfig {
+  sourceDirectory: string;
+  outputPath: string;
+  includeMetadata?: boolean;
+  jsonKeysToExtract?: string[]; // For JSON files, specify which keys to extract
+}
+
+export interface CombinedFileData {
+  filename: string;
+  filepath: string;
+  content: any;
+  fileType: 'json' | 'text' | 'other';
+  parseError?: string;
+  metadata?: {
+    size: number;
+    created: Date;
+    modified: Date;
+  };
+}
+
 const SupportedParametersDictionary = {
   tools: 'Function calling capabilities',
   tool_choice: 'Tool selection control',

@@ -10,7 +10,7 @@ import ora from "ora";
 import { LLMProcessor } from "./processor.ts";
 import { OpenRouterAPI } from "./openrouter.ts";
 import type { ProcessConfig, ModelConfig, OpenRouterModel } from "./types.ts";
-import { formatDuration, validateDirectory } from "./utils.ts";
+import { formatDuration, } from "./utils.ts";
 
 const program = new Command();
 let modelCache: OpenRouterModel[] = [];
@@ -371,7 +371,7 @@ async function runProcessor(config: ProcessConfig): Promise<void> {
 }
 
 async function createExamplePrompts(directory: string): Promise<void> {
-  const { mkdir, writeFile } = await import("fs/promises");
+  const { mkdir, writeFile } = await import("node:fs/promises");
 
   try {
     await mkdir(directory, { recursive: true });
@@ -492,6 +492,184 @@ async function runContextualProcessor(
     }
   } catch (error) {
     spinner.fail("Contextual processing failed");
+    throw error;
+  }
+}
+
+program
+  .command("csv")
+  .description("Process CSV data with a prompt template")
+  .option("-c, --csv <path>", "Path to CSV file")
+  .option("-t, --template <path>", "Path to prompt template file")
+  .option("-o, --output <dir>", "Output directory for results")
+  .option("-i, --id-column <column>", "Column to use as identifier for output files")
+  .option("-k, --api-key <key>", "OpenRouter API key")
+  .option("-m, --model <model>", "Model to use")
+  .option("--concurrent <number>", "Number of concurrent requests", "3")
+  .action(async (options) => {
+    try {
+      await runCSVProcessor(options);
+    } catch (error) {
+      console.error(
+        chalk.red("Error:"),
+        error instanceof Error ? error.message : String(error)
+      );
+      process.exit(1);
+    }
+  });
+
+program
+  .command("combine")
+  .description("Combine files in a directory into a single CSV")
+  .option("-d, --directory <path>", "Source directory containing files to combine")
+  .option("-o, --output <path>", "Output CSV file path")
+  .option("-m, --metadata", "Include file metadata (size, dates)", false)
+  .action(async (options) => {
+    try {
+      await runFileCombiner(options);
+    } catch (error) {
+      console.error(
+        chalk.red("Error:"),
+        error instanceof Error ? error.message : String(error)
+      );
+      process.exit(1);
+    }
+  });
+
+async function runCSVProcessor(options: any): Promise<void> {
+  // Get required file paths
+  let csvPath = options.csv;
+  if (!csvPath) {
+    csvPath = await fileSelector({
+      message: "Select the CSV file:",
+      type: "file",
+      filter: (stats) => stats.isFile(),
+    });
+  }
+
+  let templatePath = options.template;
+  if (!templatePath) {
+    templatePath = await fileSelector({
+      message: "Select the prompt template file:",
+      type: "file",
+      filter: (stats) => stats.isFile(),
+    });
+  }
+
+  let outputDirectory = options.output;
+  if (!outputDirectory) {
+    outputDirectory = await fileSelector({
+      message: "Select output directory:",
+      type: "directory",
+      filter: (stats) => stats.isDirectory(),
+    });
+  }
+
+  const config = await getConfiguration({ 
+    ...options, 
+    directory: outputDirectory // Reuse existing config logic
+  });
+
+  const spinner = ora("Processing CSV with template...").start();
+
+  try {
+    const processor = new LLMProcessor(config);
+    
+    const startTime = Date.now();
+    const results = await processor.processCsvWithTemplate(
+      csvPath, 
+      templatePath, 
+      outputDirectory, 
+      options.idColumn
+    );
+    const totalTime = Date.now() - startTime;
+
+    spinner.succeed("CSV processing completed!");
+
+    // Display results
+    console.log(chalk.green("\n📊 CSV Processing Results:"));
+    console.log(`  Total rows: ${results.length}`);
+    console.log(`  Successful: ${results.filter((r) => r.success).length}`);
+    console.log(`  Failed: ${results.filter((r) => !r.success).length}`);
+    console.log(`  Total time: ${totalTime}ms`);
+    console.log(
+      `  Average time per row: ${Math.round(totalTime / results.length)}ms`
+    );
+    const totalCost = results.reduce((acc, r) => acc + (r.cost || 0), 0);
+    console.log(`  Total cost: $${totalCost.toFixed(6)}`);
+
+    const failures = results.filter((r) => !r.success);
+    if (failures.length > 0) {
+      console.log(chalk.red("\n❌ Failed rows:"));
+      failures.forEach((failure) => {
+        console.log(`  Row ${failure.rowIndex}: ${failure.error}`);
+      });
+    }
+
+    const successes = results.filter((r) => r.success);
+    if (successes.length > 0) {
+      console.log(chalk.green("\n✅ Successful rows:"));
+      successes.forEach((success) => {
+        const costString = success.cost ? ` ($${success.cost.toFixed(6)})` : "";
+        console.log(
+          `  Row ${success.rowIndex} -> ${success.file} (${formatDuration(success.duration)})${costString}`
+        );
+      });
+    }
+  } catch (error) {
+    spinner.fail("CSV processing failed");
+    throw error;
+  }
+}
+
+async function runFileCombiner(options: any): Promise<void> {
+  let sourceDirectory = options.directory;
+  if (!sourceDirectory) {
+    sourceDirectory = await fileSelector({
+      message: "Select directory containing files to combine:",
+      type: "directory",
+      filter: (stats) => stats.isDirectory(),
+    });
+  }
+
+  let outputPath = options.output;
+  if (!outputPath) {
+    const defaultName = `combined_files_${new Date().toISOString().split('T')[0]}.csv`;
+    const answers = await inquirer.prompt([
+      {
+        type: "input",
+        name: "outputPath",
+        message: "Enter output CSV file path:",
+        default: `./${defaultName}`,
+      },
+    ]);
+    outputPath = answers.outputPath;
+  }
+
+  const spinner = ora("Combining files into CSV...").start();
+
+  try {
+    // Create a minimal config for the processor (we just need the file combination method)
+    const dummyConfig: ProcessConfig = {
+      directory: sourceDirectory,
+      apiKey: "",
+      modelConfig: { model: "" },
+      model: {} as any,
+    };
+    
+    const processor = new LLMProcessor(dummyConfig);
+    
+    await processor.combineFilesToCSV(sourceDirectory, outputPath, options.metadata);
+    
+    spinner.succeed(`Files combined successfully into ${outputPath}`);
+    
+    console.log(chalk.green("\n✅ File combination completed!"));
+    console.log(`  Source directory: ${sourceDirectory}`);
+    console.log(`  Output file: ${outputPath}`);
+    console.log(`  Metadata included: ${options.metadata ? 'Yes' : 'No'}`);
+    
+  } catch (error) {
+    spinner.fail("File combination failed");
     throw error;
   }
 }

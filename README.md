@@ -12,6 +12,8 @@ A CLI tool for processing multiple LLM prompts in parallel using OpenRouter API 
 - 📊 **Detailed Results**: Get comprehensive processing statistics and error reporting
 - 🎨 **Beautiful CLI**: Interactive prompts with colorful output and progress indicators
 - 🔑 **API Key Validation**: Test API keys before processing begins
+- 📋 **CSV Processing**: Process CSV data with prompt templates for dynamic content generation
+- 🔗 **File Combination**: Combine multiple files (including JSON) into a single CSV for analysis
 
 ## Installation
 
@@ -75,12 +77,92 @@ bun prompt run \
   --concurrent 5
 ```
 
+### Process CSV Data with Templates
+
+Process a CSV file where each row becomes variables in a prompt template:
+
+```bash
+bun prompt csv \
+  --csv ./data.csv \
+  --template ./template.txt \
+  --output ./results \
+  --id-column name
+```
+
+**Example CSV** (`data.csv`):
+```csv
+name,age,profession,location
+Alice Johnson,28,Software Engineer,San Francisco
+Bob Smith,35,Data Scientist,New York
+```
+
+**Example Template** (`template.txt`):
+```
+Write a professional LinkedIn summary for:
+
+Name: {{name}}
+Age: {{age}}
+Profession: {{profession}}
+Location: {{location}}
+
+Make it engaging and highlight their expertise.
+```
+
+This will process each CSV row, substitute variables in the template, and generate individual result files.
+
+### Combine Files into CSV
+
+Combine multiple files in a directory into a single CSV:
+
+```bash
+bun prompt combine \
+  --directory ./json_files \
+  --output ./combined_data.csv \
+  --metadata
+```
+
+Features:
+- **JSON Parsing**: Automatically parses JSON files and extracts keys as columns
+- **Mixed File Types**: Handles JSON, text, and other file types
+- **Metadata**: Optional file metadata (size, dates) inclusion
+- **Schema Merging**: Combines different JSON schemas intelligently
+
+### Context-aware Processing
+
+Process a single prompt with other files as context:
+
+```bash
+bun prompt context --directory ./my_project
+```
+
 ### Command Line Options
 
-- `-d, --directory <path>`: Directory containing prompt files
+#### Global Options
 - `-k, --api-key <key>`: OpenRouter API key
 - `-m, --model <model>`: Model to use (must be available on OpenRouter)
-- `-c, --concurrent <number>`: Number of concurrent requests (default: 3)
+- `--concurrent <number>`: Number of concurrent requests (default: 3)
+
+#### Command-specific Options
+
+**`run` command:**
+- `-d, --directory <path>`: Directory containing prompt files
+
+**`csv` command:**
+- `-c, --csv <path>`: Path to CSV file
+- `-t, --template <path>`: Path to prompt template file
+- `-o, --output <dir>`: Output directory for results
+- `-i, --id-column <column>`: Column to use as identifier for output files
+
+**`combine` command:**
+- `-d, --directory <path>`: Source directory containing files to combine
+- `-o, --output <path>`: Output CSV file path
+- `-m, --metadata`: Include file metadata (size, dates)
+
+**`init` command:**
+- `-d, --directory <path>`: Directory to create examples in (default: ./prompts)
+
+**`context` command:**
+- `-d, --directory <path>`: Directory containing prompt and context files
 
 ## Available Models
 

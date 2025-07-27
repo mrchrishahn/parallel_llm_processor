@@ -1,0 +1,8 @@
+Write a professional LinkedIn summary for a person with the following details:
+
+Name: {{name}}
+Age: {{age}}
+Profession: {{profession}}
+Location: {{location}}
+
+The summary should be engaging, highlight their experience and skills, and be approximately 150-200 words. Focus on their career achievements and what makes them unique in their field. 
